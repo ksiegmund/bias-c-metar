@@ -1,0 +1,190 @@
+---
+title: "Correct Bias using Meta Regression"
+format: html
+---
+
+## Simulate the population
+
+Let $P(E=1)=0.05$, and require $C=0$ whenever $E=1$. To obtain
+$P(C=1)=0.30$ in the whole population, the prevalence of $C$ among people
+with $E=0$ must be
+
+$$
+P(C=1\mid E=0)
+= \frac{P(C=1)}{P(E=0)}
+= \frac{0.30}{0.95}
+= 0.3157895.
+$$
+
+The outcome is generated from
+
+$$
+\operatorname{logit}\{P(D=1\mid E,C)\}
+= \alpha + \log(4)E + \log(8)C.
+$$
+
+Thus, 4 and 8 are conditional odds ratios. The intercept $\alpha$ is chosen
+so that the expected population prevalence of $D$ is $7/10{,}000$.
+
+```{r simulate}
+set.seed(45)
+
+n <- 1e6
+
+# Target population quantities
+p_D <- 7 / 10000
+p_E <- 0.05
+p_C <- 0.30
+OR_E <- 4
+OR_C <- 8
+
+# Because C = 0 for all E = 1:
+p_C_given_E0 <- p_C / (1 - p_E)
+p_C_given_E0
+
+# There are three possible (E, C) strata, with these population weights:
+# (0, 0): 0.65; (0, 1): 0.30; (1, 0): 0.05.
+mean_D_given_alpha <- function(alpha) {
+  (1 - p_E) * (1 - p_C_given_E0) * plogis(alpha) +
+    (1 - p_E) * p_C_given_E0 * plogis(alpha + log(OR_C)) +
+    p_E * plogis(alpha + log(OR_E))
+}
+
+# Calibrate the baseline log odds to the target marginal prevalence of D.
+alpha <- uniroot(
+  function(a) mean_D_given_alpha(a) - p_D,
+  interval = c(-30, 0)
+)$root
+
+# Simulate E and then C conditional on E.
+E <- rbinom(n, size = 1, prob = p_E)
+C <- integer(n)
+C[E == 0] <- rbinom(sum(E == 0), size = 1, prob = p_C_given_E0)
+
+# Simulate D under the logistic model.
+p_D_i <- plogis(alpha + log(OR_E) * E + log(OR_C) * C)
+D <- rbinom(n, size = 1, prob = p_D_i)
+
+sim <- data.frame(E, C, D)
+
+# Check the simulated prevalences (they will vary slightly by chance).
+c(
+  prevalence_D = mean(sim$D),
+  prevalence_E = mean(sim$E),
+  prevalence_C = mean(sim$C),
+  prevalence_C_given_E0 = mean(sim$C[sim$E == 0]),
+  prevalence_C_given_E1 = mean(sim$C[sim$E == 1])
+)
+
+# The model-implied stratum-specific disease probabilities.
+data.frame(
+  E = c(0, 0, 1),
+  C = c(0, 1, 0),
+  prob_D = plogis(alpha + log(OR_E) * c(0, 0, 1) +
+                           log(OR_C) * c(0, 1, 0))
+)
+```
+
+Because the disease is rare, a simulation of one million people will contain
+about 700 cases, but the realized number will not generally be exactly 700.
+
+## Simulation study and logistic regression analysis
+
+The following function simulates one population and fits two models. The
+adjusted model includes both $E$ and $C$, whereas the unadjusted model includes
+only $E$. It uses grouped binomial data for the three possible $(E,C)$ strata.
+This gives the same logistic regression estimates as individual-level data but
+avoids storing 100 separate data sets of one million rows each.
+
+```{r simulation-study}
+simulate_and_analyze <- function(replicate_id, n, alpha, p_E,
+                                 p_C_given_E0, OR_E, OR_C) {
+  # The only possible strata are (E=0, C=0), (E=0, C=1), and
+  # (E=1, C=0), because C is always 0 when E is 1.
+  strata <- data.frame(
+    E = c(0, 0, 1),
+    C = c(0, 1, 0)
+  )
+
+  stratum_probabilities <- c(
+    (1 - p_E) * (1 - p_C_given_E0),
+    (1 - p_E) * p_C_given_E0,
+    p_E
+  )
+
+  strata$N <- as.vector(rmultinom(1, size = n,
+                                  prob = stratum_probabilities))
+  strata$Prob_D <- plogis(
+    alpha + log(OR_E) * strata$E + log(OR_C) * strata$C
+  )
+  strata$Cases <- rbinom(nrow(strata), size = strata$N,
+                         prob = strata$Prob_D)
+  strata$Noncases <- strata$N - strata$Cases
+
+  adjusted_model <- glm(
+    cbind(Cases, Noncases) ~ E + C,
+    data = strata,
+    family = binomial()
+  )
+  unadjusted_model <- glm(
+    cbind(Cases, Noncases) ~ E,
+    data = strata,
+    family = binomial()
+  )
+
+  extract_E_estimate <- function(model, analysis, model_label) {
+    coefficient <- unname(coef(model)["E"])
+
+    data.frame(
+      Replicate = replicate_id,
+      Analysis = analysis,
+      Model = model_label,
+      Coefficient = coefficient,
+      Odds_Ratio = exp(coefficient),
+      row.names = NULL
+    )
+  }
+
+  rbind(
+    extract_E_estimate(adjusted_model, "Adjusted", "D ~ E + C"),
+    extract_E_estimate(unadjusted_model, "Unadjusted", "D ~ E")
+  )
+}
+
+set.seed(20261016)
+n_replicates <- 100
+
+# Save the coefficient and odds ratio from every replicate.
+replicate_results <- do.call(
+  rbind,
+  lapply(
+    seq_len(n_replicates),
+    simulate_and_analyze,
+    n = n,
+    alpha = alpha,
+    p_E = p_E,
+    p_C_given_E0 = p_C_given_E0,
+    OR_E = OR_E,
+    OR_C = OR_C
+  )
+)
+
+# Calculate the mean coefficient and mean exponentiated coefficient.
+mean_results <- aggregate(
+  cbind(Coefficient, Odds_Ratio) ~ Analysis + Model,
+  data = replicate_results,
+  FUN = mean
+)
+mean_results <- mean_results[match(c("Adjusted", "Unadjusted"),
+                                   mean_results$Analysis), ]
+row.names(mean_results) <- NULL
+
+knitr::kable(
+  mean_results,
+  digits = c(NA, NA, 3, 3),
+  col.names = c("Analysis", "Model", "Mean coefficient for E",
+                "Mean odds ratio for E"),
+  caption = paste("Mean logistic regression estimates across",
+                  n_replicates, "simulated populations")
+)
+```
