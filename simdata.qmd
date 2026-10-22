@@ -1,7 +1,15 @@
 ---
-title: "Correct Bias using Meta Regression"
+title: "Meta-regression to correct for biased estimates"
 format: html
 ---
+
+## Meta Regression
+
+In epidemiology, meta-analysis is used to summarize effect estimates across multiple studies. Ideally, the studies for which a summary measure is computed are each well designed and have proper control over confounding variables. However, one proposed use for meta-analysis is also to correct for methodological flaws. When there is bias in effect estimates due to uncontrolled confounding, there is a desire to correct those biases using multiple study outcomes.
+
+Meta regression offers an approach to explain variation in effect estimates from different studies using study characteristics. It is preferred that the study characteristic is shared by all individuals in the study to avoid the possibility of ecologic bias that can arise from an analysis of aggregate data. An example categorical variable is study design (e.g., cohort, population-based case control, hospital-based case control), and continuous variable is latitude. Then, meta-regression captures effect modification of treatment effect by the study-level variable. 
+
+We propose a situation for a binary confounder when meta-regression can be used to correct for bias due to uncontrolled confounding across study populations. We specify the necessary assumptions and demonstrate the approach using a simulation study grounded by estimated exposure frequencies and risk estimates for bladder cancer.
 
 ## Simulate the population
 
