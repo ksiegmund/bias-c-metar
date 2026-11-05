@@ -21,3 +21,5 @@ among unexposed individuals.
 
 Notice that the effect size for a prevalence of 0 is the adjusted effect size. Would the
 intercept term from a meta-regression give us a good estimate?
+
+[The code was written with the help of CodeX.]
