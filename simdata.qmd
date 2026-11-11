@@ -104,7 +104,7 @@ only $E$. It uses grouped binomial data for the three possible $(E,C)$ strata.
 This gives the same logistic regression estimates as individual-level data but
 avoids storing 100 separate data sets of one million rows each.
 
-```{r simulation-study}
+```{r simulation-functions}
 simulate_and_analyze <- function(replicate_id, n, alpha, p_E,
                                  p_C_given_E0, OR_E, OR_C) {
   # The only possible strata are (E=0, C=0), (E=0, C=1), and
@@ -158,7 +158,9 @@ simulate_and_analyze <- function(replicate_id, n, alpha, p_E,
     extract_E_estimate(unadjusted_model, "Unadjusted", "D ~ E")
   )
 }
+```
 
+```{r simulation}
 set.seed(20261016)
 n_replicates <- 100
 
