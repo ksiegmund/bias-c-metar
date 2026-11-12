@@ -1,0 +1,346 @@
+---
+title: "Meta-regression to correct for biased estimates"
+format: html
+---
+
+## Meta Regression
+
+In epidemiology, meta-analysis is used to summarize effect estimates across multiple studies. Ideally, the studies for which a summary measure is computed are each well designed and have proper control over confounding variables. However, one proposed use for meta-analysis is also to correct for methodological flaws. When there is bias in effect estimates due to uncontrolled confounding, there is a desire to correct those biases using multiple study outcomes.
+
+Meta regression offers an approach to explain variation in effect estimates from different studies using study characteristics. It is preferred that the study characteristic is shared by all individuals in the study to avoid the possibility of ecologic bias that can arise from an analysis of aggregate data. An example categorical variable is study design (e.g., cohort, population-based case control, hospital-based case control), and continuous variable is latitude. Then, meta-regression captures effect modification of treatment effect by the study-level variable.
+
+We propose a situation for a binary confounder when meta-regression can be used to correct for bias due to uncontrolled confounding across study populations. We specify the necessary assumptions and demonstrate the approach using a simulation study grounded by estimated exposure frequencies and risk estimates for bladder cancer.
+
+## Simulate the population
+
+Let $P(E=1)=0.05$, and require $C=0$ whenever $E=1$. To obtain
+$P(C=1)=0.30$ in the whole population, the prevalence of $C$ among people
+with $E=0$ must be
+
+$$
+P(C=1\mid E=0)
+= \frac{P(C=1)}{P(E=0)}
+= \frac{0.30}{0.95}
+= 0.3157895.
+$$
+
+The outcome is generated from
+
+$$
+\operatorname{logit}\{P(D=1\mid E,C)\}
+= \alpha + \log(4)E + \log(2)C.
+$$
+
+Thus, 4 and 2 are conditional odds ratios. The intercept $\alpha$ is chosen
+so that the expected population prevalence of $D$ is $7/10{,}000$.
+
+```{r simulate}
+set.seed(45)
+
+n <- 1e6
+
+# Target population quantities
+p_D <- 7 / 10000
+p_E <- 0.05
+p_C <- 0.30
+OR_E <- 4
+OR_C <- 2
+
+# Because C = 0 for all E = 1:
+p_C_given_E0 <- p_C / (1 - p_E)
+p_C_given_E0
+
+# There are three possible (E, C) strata, with these population weights:
+# (0, 0): 0.65; (0, 1): 0.30; (1, 0): 0.05.
+mean_D_given_alpha <- function(alpha) {
+  (1 - p_E) * (1 - p_C_given_E0) * plogis(alpha) +
+    (1 - p_E) * p_C_given_E0 * plogis(alpha + log(OR_C)) +
+    p_E * plogis(alpha + log(OR_E))
+}
+
+# Calibrate the baseline log odds to the target marginal prevalence of D.
+alpha <- uniroot(
+  function(a) mean_D_given_alpha(a) - p_D,
+  interval = c(-30, 0)
+)$root
+
+# Simulate E and then C conditional on E.
+E <- rbinom(n, size = 1, prob = p_E)
+C <- integer(n)
+C[E == 0] <- rbinom(sum(E == 0), size = 1, prob = p_C_given_E0)
+
+# Simulate D under the logistic model.
+p_D_i <- plogis(alpha + log(OR_E) * E + log(OR_C) * C)
+D <- rbinom(n, size = 1, prob = p_D_i)
+
+sim <- data.frame(E, C, D)
+
+# Check the simulated prevalences (they will vary slightly by chance).
+c(
+  prevalence_D = mean(sim$D),
+  prevalence_E = mean(sim$E),
+  prevalence_C = mean(sim$C),
+  prevalence_C_given_E0 = mean(sim$C[sim$E == 0]),
+  prevalence_C_given_E1 = mean(sim$C[sim$E == 1])
+)
+
+# The model-implied stratum-specific disease probabilities.
+data.frame(
+  E = c(0, 0, 1),
+  C = c(0, 1, 0),
+  prob_D = plogis(alpha + log(OR_E) * c(0, 0, 1) +
+                           log(OR_C) * c(0, 1, 0))
+)
+```
+
+Because the disease is rare, a simulation of one million people will contain
+about 700 cases, but the realized number will not generally be exactly 700.
+
+## Simulation study and logistic regression analysis
+
+The following function simulates disease as a function of both $E$ and $C$,
+but fits the logistic regression with $E$ only (unadjusted).
+It uses grouped binomial data for the three possible $(E,C)$ strata.
+This gives the same logistic regression estimates as individual-level data but
+avoids storing the individual-level data from every simulated population.
+
+To explore the use of meta-regression as a possible method to correct the bias in the estimated (unadjusted) effect size, we run the following simulation.
+
+Do the following 100 times:
+1. For 15 studies: Draw population prevalence $p_C$ from uniform[0.1,0.5], simulate data for a cohort of 100,000 people and fit the unadjusted logistic regression model (only predictor is E). Save the estimate of the crude (unadjusted) log odds ratio and the frequency of $C$. For each combination of $p_C$ and $\mathrm{OR}_C$, the intercept is recalibrated so that the expected population prevalence of disease remains $7/10{,}000$.
+2. Run a meta-regression of the saved results from 1: log odds ratio (outcome) as a function of the population
+prevalence $p_C$ and save the intercept estimate and its standard error. Then also run a meta-analysis of the log odds ratios and save the summary log odds ratio.
+
+For both the 100 meta-regression intercepts and the 100 ordinary meta-analysis
+summary estimates, compute the mean log odds ratio, its standard deviation
+across simulations, and the mean model-based standard error. Compute the 95%
+interval using the standard deviation across simulations. Exponentiate the mean
+log odds ratio and interval limits, and report the corresponding odds ratios.
+
+Also draw a scatterplot of the data for the last meta-regression analysis along with the fitted regression line. Use ggplot2 for the figure.
+
+```{r simulation-functions}
+#| message: false
+
+library(metafor)
+
+simulate_study <- function(study_id, n, p_C, p_D, p_E, OR_E, OR_C) {
+  p_C_given_E0 <- p_C / (1 - p_E)
+
+  # Recalibrate the intercept for this study so that its expected marginal
+  # disease prevalence is p_D.
+  expected_prevalence <- function(alpha) {
+    (1 - p_E) * (1 - p_C_given_E0) * plogis(alpha) +
+      (1 - p_E) * p_C_given_E0 * plogis(alpha + log(OR_C)) +
+      p_E * plogis(alpha + log(OR_E))
+  }
+  alpha <- uniroot(
+    function(a) expected_prevalence(a) - p_D,
+    interval = c(-30, 0)
+  )$root
+
+  # Only three (E, C) strata are possible because C = 0 when E = 1.
+  strata <- data.frame(
+    E = c(0, 0, 1),
+    C = c(0, 1, 0)
+  )
+  stratum_probabilities <- c(
+    (1 - p_E) * (1 - p_C_given_E0),
+    (1 - p_E) * p_C_given_E0,
+    p_E
+  )
+  strata$N <- as.vector(rmultinom(1, size = n,
+                                  prob = stratum_probabilities))
+  strata$prob_D <- plogis(
+    alpha + log(OR_E) * strata$E + log(OR_C) * strata$C
+  )
+  strata$cases <- rbinom(nrow(strata), size = strata$N,
+                         prob = strata$prob_D)
+  strata$noncases <- strata$N - strata$cases
+
+  crude_model <- glm(
+    cbind(cases, noncases) ~ E,
+    data = strata,
+    family = binomial()
+  )
+  coefficient_table <- summary(crude_model)$coefficients
+
+  data.frame(
+    study = study_id,
+    p_C_target = p_C,
+    p_C_observed = sum(strata$C * strata$N) / n,
+    log_or = unname(coefficient_table["E", "Estimate"]),
+    se_log_or = unname(coefficient_table["E", "Std. Error"])
+  )
+}
+
+simulate_meta_analysis <- function(simulation_id, studies_per_simulation,
+                                   n_per_study, p_D, p_E, OR_E, OR_C) {
+  p_C_draws <- runif(studies_per_simulation, min = 0.1, max = 0.5)
+
+  studies <- do.call(
+    rbind,
+    lapply(
+      seq_len(studies_per_simulation),
+      function(study_id) {
+        simulate_study(
+          study_id = study_id,
+          n = n_per_study,
+          p_C = p_C_draws[study_id],
+          p_D = p_D,
+          p_E = p_E,
+          OR_E = OR_E,
+          OR_C = OR_C
+        )
+      }
+    )
+  )
+
+  # Fixed-effect inverse-variance meta-regression.
+  meta_regression_model <- rma(
+    yi = log_or,
+    sei = se_log_or,
+    mods = ~ p_C_target,
+    data = studies,
+    method = "FE"
+  )
+
+  # Ordinary fixed-effect inverse-variance meta-analysis without a moderator.
+  meta_analysis_model <- rma(
+    yi = log_or,
+    sei = se_log_or,
+    data = studies,
+    method = "FE"
+  )
+
+  results <- data.frame(
+    simulation = simulation_id,
+    analysis = c("Meta-regression intercept", "Meta-analysis summary"),
+    estimate = c(
+      unname(coef(meta_regression_model)[1]),
+      unname(coef(meta_analysis_model)[1])
+    ),
+    standard_error = c(
+      meta_regression_model$se[1],
+      meta_analysis_model$se[1]
+    ),
+    row.names = NULL
+  )
+
+  list(
+    studies = studies,
+    meta_regression_model = meta_regression_model,
+    meta_analysis_model = meta_analysis_model,
+    results = results
+  )
+}
+```
+
+```{r simulation}
+#| warning: false
+
+set.seed(20261016)
+n_simulations <- 100
+studies_per_simulation <- 15
+n_per_study <- 100000
+
+simulation_runs <- lapply(
+  seq_len(n_simulations),
+  simulate_meta_analysis,
+  studies_per_simulation = studies_per_simulation,
+  n_per_study = n_per_study,
+  p_D = p_D,
+  p_E = p_E,
+  OR_E = OR_E,
+  OR_C = OR_C
+)
+
+simulation_results <- do.call(
+  rbind,
+  lapply(simulation_runs, `[[`, "results")
+)
+
+# Retain the meta-regression intercept and ordinary meta-analysis summary
+# estimate from every simulation; display the first few rows here.
+knitr::kable(head(simulation_results, 10), digits = 3)
+```
+
+## Simulation results
+
+```{r results}
+summarize_analysis <- function(results) {
+  mean_log_or <- mean(results$estimate)
+  empirical_sd <- sd(results$estimate)
+  mean_model_se <- mean(results$standard_error)
+  ci_log_or <- mean_log_or + qnorm(c(0.025, 0.975)) * empirical_sd
+
+  data.frame(
+    analysis = results$analysis[1],
+    mean_log_or = mean_log_or,
+    empirical_sd = empirical_sd,
+    mean_model_se = mean_model_se,
+    log_or_interval = sprintf("%.3f to %.3f", ci_log_or[1], ci_log_or[2]),
+    mean_or = exp(mean_log_or),
+    or_interval = sprintf(
+      "%.3f to %.3f",
+      exp(ci_log_or[1]),
+      exp(ci_log_or[2])
+    ),
+    row.names = NULL
+  )
+}
+
+results_by_analysis <- split(
+  simulation_results,
+  factor(
+    simulation_results$analysis,
+    levels = c("Meta-regression intercept", "Meta-analysis summary")
+  )
+)
+summary_table <- do.call(rbind, lapply(results_by_analysis, summarize_analysis))
+row.names(summary_table) <- NULL
+
+knitr::kable(
+  summary_table,
+  digits = 3,
+  col.names = c(
+    "Analysis",
+    "Mean log OR",
+    "Empirical SD",
+    "Mean model SE",
+    "Empirical 95% interval (log OR)",
+    "Mean OR",
+    "Empirical 95% interval (OR)"
+  )
+)
+```
+
+For each method, the interval uses the empirical standard deviation of its 100
+simulated estimates. The odds-ratio estimate and limits are the exponentiated
+mean log odds ratio and interval limits.
+
+```{r last-meta-regression-plot}
+#| fig-cap: "Study estimates and fitted line for the final simulated meta-regression"
+#| fig-width: 7
+#| fig-height: 5
+#| message: false
+
+library(ggplot2)
+
+last_run <- simulation_runs[[n_simulations]]
+
+ggplot(last_run$studies, aes(x = p_C_target, y = log_or)) +
+  geom_point(size = 2.5, alpha = 0.8) +
+  geom_abline(
+    intercept = coef(last_run$meta_regression_model)[1],
+    slope = coef(last_run$meta_regression_model)[2],
+    color = "#0072B2",
+    linewidth = 1
+  ) +
+  coord_cartesian(xlim = c(0, 0.5)) +
+  labs(
+    x = "Population prevalence of C",
+    y = "Crude log odds ratio"
+  ) +
+  theme_minimal(base_size = 12)
+```
