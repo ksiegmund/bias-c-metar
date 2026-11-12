@@ -197,7 +197,7 @@ simulate_meta_analysis <- function(simulation_id, studies_per_simulation,
   )
 
   # Fixed-effect inverse-variance meta-regression.
-  meta_regression_model <- rma(
+  meta_regression_model <- metafor::rma(
     yi = log_or,
     sei = se_log_or,
     mods = ~ p_C_target,
@@ -206,7 +206,7 @@ simulate_meta_analysis <- function(simulation_id, studies_per_simulation,
   )
 
   # Ordinary fixed-effect inverse-variance meta-analysis without a moderator.
-  meta_analysis_model <- rma(
+  meta_analysis_model <- metafor::rma(
     yi = log_or,
     sei = se_log_or,
     data = studies,
