@@ -31,14 +31,14 @@ $$
 = \alpha + \log(OR_E)E + \log(OR_C)C.
 $$
 
-Thus, $OR_E$ and $OR_C$ are conditional odds ratios. We posit $OR_E$ = 4, and study the bias in the unadjusted estimate of $OR_E$ if $OR_C <> 1 $. 
+Thus, $OR_E$ and $OR_C$ are conditional odds ratios. We posit $OR_E$ = 4, and study the bias in the unadjusted estimate of $OR_E$ if $OR_C$ is not equal to 1. 
 
 We model logistic regression, assuming a rare disease. In the simulations, the intercept $\alpha$ is chosen so that the expected population prevalence of $D$ is $7/10{,}000$. 
 
-First, we simulate the data under single effects for $OR_E$ and for $OR_C$ across populations, making a fixed effect model appropriate. Later, we can extend this to a random effects model.  
+Let's estimate the $ORs$ for a single data set.
 
 ```{r simulate}
-set.seed(45)
+set.seed(4500)
 
 n <- 1e6
 
@@ -94,10 +94,85 @@ data.frame(
   prob_D = plogis(alpha + log(OR_E) * c(0, 0, 1) +
                            log(OR_C) * c(0, 1, 0))
 )
+
+# Simulate one data set as grouped binomial counts for the possible (E, C)
+# strata, rather than storing one row per individual.
+grouped_data <- data.frame(
+  E = c(0, 0, 1),
+  C = c(0, 1, 0),
+  stratum_probability = c(
+    (1 - p_E) * (1 - p_C_given_E0),
+    (1 - p_E) * p_C_given_E0,
+    p_E
+  )
+)
+grouped_data$n <- as.vector(
+  rmultinom(1, size = n, prob = grouped_data$stratum_probability)
+)
+grouped_data$prob_D <- plogis(
+  alpha + log(OR_E) * grouped_data$E + log(OR_C) * grouped_data$C
+)
+grouped_data$cases <- rbinom(
+  nrow(grouped_data), size = grouped_data$n, prob = grouped_data$prob_D
+)
+grouped_data$controls <- grouped_data$n - grouped_data$cases
+
+# Construct exposed/unexposed rows and estimate the exposure odds ratio. The
+# exposed group with C = 1 is structurally empty because E = 1 implies C = 0.
+exposure_summary <- function(data, label) {
+  counts <- lapply(0:1, function(exposure) {
+    rows <- data$E == exposure
+    c(
+      cases = sum(data$cases[rows]),
+      controls = sum(data$controls[rows])
+    )
+  })
+
+  unexposed <- counts[[1]]
+  exposed <- counts[[2]]
+  cells <- c(exposed, unexposed)
+
+  if (all(cells > 0)) {
+    log_or <- log(
+      (exposed["cases"] * unexposed["controls"]) /
+        (exposed["controls"] * unexposed["cases"])
+    )
+    se_log_or <- sqrt(sum(1 / cells))
+    ci <- exp(log_or + qnorm(c(0.025, 0.975)) * se_log_or)
+    exposed_or <- sprintf("%.2f", exp(log_or))
+    exposed_ci <- sprintf("%.2f to %.2f", ci[1], ci[2])
+  } else {
+    exposed_or <- "Not estimable"
+    exposed_ci <- "Not estimable"
+  }
+
+  result <- data.frame(
+    `Number of cases` = c(exposed["cases"], unexposed["cases"]),
+    `Number of controls` = c(exposed["controls"], unexposed["controls"]),
+    `Odds ratio` = c(exposed_or, "1.00 (reference)"),
+    `95% CI` = c(exposed_ci, "Reference"),
+    check.names = FALSE
+  )
+  row.names(result) <- paste(label, c("Exposed", "Unexposed"), sep = ": ")
+  result
+}
+
+grouped_summary <- rbind(
+  exposure_summary(grouped_data, "Overall"),
+  exposure_summary(grouped_data[grouped_data$C == 0, ], "C = 0"),
+  exposure_summary(grouped_data[grouped_data$C == 1, ], "C = 1")
+)
+
+knitr::kable(
+  grouped_summary,
+  caption = "Grouped binomial data and crude/stratum-specific exposure odds ratios",
+  align = c("r", "r", "c", "c")
+)
 ```
 
-Because the disease is rare, a simulation of one million people will contain
-about 700 cases, but the realized number will not generally be exactly 700.
+Because the disease is rare, a simulation of 1 million people will contain about 700 cases, but the realized number will not generally be exactly 700. For a single data set, the bias is easier to see for a large sample size. The summary estimate of the unadjusted $OR_E$ is biased downwards and the 95% confidence interval does not include the true value 4.0. The estimate in non-smokers is not biased due to the effect in smoking. Although less than the true value, the true value is covered by the 95% confidence inteval.
+
+This sample size is not realistic for cohort studies, so in our simulations we draw sample sizes between 50,000 and 250,000 individuals.  
 
 ## Simulation study and logistic regression analysis
 
@@ -122,6 +197,8 @@ log odds ratio and interval limits, and report the corresponding odds ratios.
 Also draw a bubble plot of the data for the last meta-regression analysis along
 with the fitted regression line. Use `metafor::regplot()` and make each point's
 area proportional to the study sample size.
+
+In this simulation study, we simulate the data under single effects for $OR_E$ and for $OR_C$ across populations, making a fixed effect model appropriate. Later, we can extend this to a random effects model.  
 
 ```{r simulation-functions}
 #| message: false
@@ -336,15 +413,9 @@ mean log odds ratio and interval limits.
 
 last_run <- simulation_runs[[n_simulations]]
 
-# Scale point radii by sqrt(n), so point areas are proportional to study size.
-sample_size_cex <- 0.8 + 2.2 * (
-  sqrt(last_run$studies$n) - min(sqrt(last_run$studies$n))
-) / diff(range(sqrt(last_run$studies$n)))
-
 metafor::regplot(
   last_run$meta_regression_model,
   mod = "p_C_target",
-  psize = sample_size_cex,
   xlim = c(0, 0.5),
   predlim = c(0, 0.5),
   xlab = "Population prevalence of C",
